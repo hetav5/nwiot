@@ -1,0 +1,54 @@
+# Environment variables
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+logs/
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Output files
+*.json
+translated_comics/
+output/
+
+# Test images (uncomment if you want to exclude)
+*.jpg
+*.jpeg
+*.png
+*.webp
+
+# OS
+.DS_Store
+Thumbs.db
+
+#db tunnel
+start-tunnel.sh
+stop-tunnel.sh
+
