@@ -73,53 +73,19 @@ def rect_area(r):
     return max(0, r[2] - r[0]) * max(0, r[3] - r[1])
 
 
-def main():
-    p = argparse.ArgumentParser(description="Parking slot occupancy detector")
-    p.add_argument("image", help="Path to input image")
-    p.add_argument("--model", default="yolo11n.pt", help="YOLO model path")
-    p.add_argument("--slots", default="annotated_parking_coords.txt",
-                   help="Slots file (x1,y1,x2,y2[,flag])")
-    p.add_argument("--output", "-o", default="parking_out.jpg",
-                   help="Annotated output image")
-    p.add_argument("--classes", nargs="*", type=int, default=None,
-                   help="Class IDs to treat as occupied objects (default: all classes)")
-    p.add_argument("--conf", type=float, default=0.25,
-                   help="Confidence threshold for detections (default: 0.25)")
-    args = p.parse_args()
-
-    if not os.path.exists(args.image):
-        print("Error: image not found:", args.image)
-        return
-
-    if not os.path.exists(args.model):
-        print("Error: YOLO model not found:", args.model)
-        return
-
-    img = cv2.imread(args.image)
-    if img is None:
-        print("Error: failed to read image")
-        return
-
-    slots = load_slots(args.slots)
-    # scale slots if annotation coordinates were for a different resolution
-    slots = scale_slots_to_image(slots, img.shape[1], img.shape[0])
-
-    model = YOLO(args.model)
-    results = model(img)
+def process_frame(frame, slots, model, classes, conf, imgsz, device, overlap_threshold=0.15):
+    results = model.predict(frame, conf=conf, imgsz=imgsz,
+                            device=device, verbose=False)
 
     detected_boxes = []
     for r in results:
         for box in r.boxes:
             cls = int(box.cls)
-            conf = float(box.conf)
-            if conf < args.conf:
-                continue
-            if args.classes is not None and len(args.classes) > 0 and cls not in args.classes:
+            if classes is not None and len(classes) > 0 and cls not in classes:
                 continue
             x1, y1, x2, y2 = map(int, box.xyxy[0])
             detected_boxes.append((x1, y1, x2, y2))
 
-    # Map each detected object to exactly one best-matching slot.
     occupied_indices = set()
     for db in detected_boxes:
         best_idx = -1
@@ -135,10 +101,10 @@ def main():
             if score > best_score:
                 best_score = score
                 best_idx = i
-        if best_idx >= 0 and best_score >= 0.15:
+        if best_idx >= 0 and best_score >= overlap_threshold:
             occupied_indices.add(best_idx)
 
-    annotated = img.copy()
+    annotated = frame.copy()
     for i, s in enumerate(slots):
         occ = i in occupied_indices
         color = (0, 0, 255) if occ else (0, 255, 0)
@@ -147,18 +113,117 @@ def main():
     total = len(slots)
     occupied = len(occupied_indices)
     free = total - occupied
-
     cv2.putText(annotated, f"Free: {free} / {total}", (20, 40),
                 cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 0), 2)
 
-    try:
-        cv2.imshow("Parking", annotated)
-        cv2.waitKey(0)
-        cv2.destroyAllWindows()
-    except cv2.error:
-        cv2.imwrite(args.output, annotated)
-        print("Saved annotated image to", args.output)
+    return annotated, occupied, free, total
 
+
+def main():
+    p = argparse.ArgumentParser(description="Parking slot occupancy detector")
+    p.add_argument("image", nargs="?", default=None,
+                   help="Path to input image (optional when --camera is used)")
+    p.add_argument("--model", default="yolo11n.pt", help="YOLO model path")
+    p.add_argument("--slots", default="annotated_parking_coords.txt",
+                   help="Slots file (x1,y1,x2,y2[,flag])")
+    p.add_argument("--output", "-o", default="parking_out.jpg",
+                   help="Annotated output image")
+    p.add_argument("--classes", nargs="*", type=int, default=None,
+                   help="Class IDs to treat as occupied objects (default: all classes)")
+    p.add_argument("--conf", type=float, default=0.25,
+                   help="Confidence threshold for detections (default: 0.25)")
+    p.add_argument("--imgsz", type=int, default=416,
+                   help="Inference image size for YOLO (default: 416, good for Raspberry Pi)")
+    p.add_argument("--camera", action="store_true",
+                   help="Use webcam/video capture mode instead of single image")
+    p.add_argument("--camera-index", type=int, default=0,
+                   help="Camera index for cv2.VideoCapture (default: 0)")
+    p.add_argument("--show", action="store_true",
+                   help="Display OpenCV window (off by default for headless Raspberry Pi)")
+    p.add_argument("--device", default="cpu",
+                   help="YOLO device, e.g. cpu or 0 (default: cpu)")
+    p.add_argument("--save-interval", type=int, default=30,
+                   help="In camera mode, save annotated frame every N frames (default: 30)")
+    args = p.parse_args()
+
+    if not args.camera:
+        if not args.image:
+            print("Error: image path is required when not using --camera")
+            return
+        if not os.path.exists(args.image):
+            print("Error: image not found:", args.image)
+            return
+
+    if not os.path.exists(args.model):
+        print("Error: YOLO model not found:", args.model)
+        return
+
+    model = YOLO(args.model)
+
+    if args.camera:
+        cap = cv2.VideoCapture(args.camera_index)
+        if not cap.isOpened():
+            print(f"Error: could not open camera index {args.camera_index}")
+            return
+
+        slots = load_slots(args.slots)
+        frame_count = 0
+        while True:
+            ok, frame = cap.read()
+            if not ok:
+                print("Warning: failed to read frame from camera")
+                break
+
+            frame_count += 1
+            scaled_slots = scale_slots_to_image(
+                slots, frame.shape[1], frame.shape[0])
+            annotated, occupied, free, total = process_frame(
+                frame, scaled_slots, model, args.classes, args.conf, args.imgsz, args.device
+            )
+
+            if args.show:
+                try:
+                    cv2.imshow("Parking", annotated)
+                    key = cv2.waitKey(1) & 0xFF
+                    if key == ord('q'):
+                        break
+                except cv2.error:
+                    pass
+
+            if frame_count % max(1, args.save_interval) == 0:
+                cv2.imwrite(args.output, annotated)
+                print(
+                    f"Frame {frame_count}: Total={total}, Occupied={occupied}, Free={free}")
+
+        cap.release()
+        if args.show:
+            try:
+                cv2.destroyAllWindows()
+            except cv2.error:
+                pass
+        return
+
+    img = cv2.imread(args.image)
+    if img is None:
+        print("Error: failed to read image")
+        return
+
+    slots = load_slots(args.slots)
+    scaled_slots = scale_slots_to_image(slots, img.shape[1], img.shape[0])
+    annotated, occupied, free, total = process_frame(
+        img, scaled_slots, model, args.classes, args.conf, args.imgsz, args.device
+    )
+
+    if args.show:
+        try:
+            cv2.imshow("Parking", annotated)
+            cv2.waitKey(0)
+            cv2.destroyAllWindows()
+        except cv2.error:
+            pass
+
+    cv2.imwrite(args.output, annotated)
+    print("Saved annotated image to", args.output)
     print(f"Total slots: {total}; Occupied: {occupied}; Free: {free}")
 
 
