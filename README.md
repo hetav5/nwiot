@@ -31,6 +31,31 @@ pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
+If you get `Illegal instruction` on Raspberry Pi, it is usually from `torch/ultralytics` binary compatibility.
+Use the OpenCV ONNX backend (no torch runtime required on Pi).
+
+## 1.1) Illegal Instruction Fix (Recommended on Pi)
+
+1. Export ONNX once on your laptop/PC (not on Pi):
+
+```bash
+yolo export model=yolo11n.pt format=onnx imgsz=416
+```
+
+2. Copy `yolo11n.onnx` to Raspberry Pi project folder.
+
+3. Run script on Pi with OpenCV backend:
+
+```bash
+python parking_system.py model_2/test_obj.jpeg --backend opencv --model yolo11n.onnx --slots annotated_parking_coords.txt -o out.jpg --imgsz 416
+```
+
+For live camera on Pi with OpenCV backend:
+
+```bash
+python parking_system.py --camera --backend opencv --model yolo11n.onnx --slots annotated_parking_coords.txt -o latest_frame.jpg --camera-index 0 --imgsz 416 --save-interval 30
+```
+
 If your camera is PiCam, make sure V4L2 is available (`/dev/video0`).
 
 ## 2) Single Image Run
@@ -38,6 +63,21 @@ If your camera is PiCam, make sure V4L2 is available (`/dev/video0`).
 ```bash
 python parking_system.py model_2/test_obj.jpeg --model yolo11n.pt --slots annotated_parking_coords.txt -o out.jpg --device cpu --imgsz 416
 ```
+
+If your slot file is wrong/misaligned, generate slots as a fixed 2x3 grid (6 total):
+
+```bash
+python parking_system.py model_2/test2.jpeg --model yolo11n.pt --grid-rows 3 --grid-cols 2 -o out.jpg --device cpu --imgsz 416
+```
+
+Optional: restrict grid to a region of interest:
+
+```bash
+python parking_system.py model_2/test2.jpeg --model yolo11n.pt --grid-rows 3 --grid-cols 2 --grid-roi 0,0,830,1280 -o out.jpg --device cpu --imgsz 416
+```
+
+If `ultralytics` works on your Pi, this command is fine.
+If not, use `--backend opencv --model yolo11n.onnx`.
 
 Expected output format:
 

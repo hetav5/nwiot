@@ -1,7 +1,7 @@
 import cv2
 import os
 import argparse
-from ultralytics import YOLO
+import numpy as np
 
 
 def load_slots(path):
@@ -49,6 +49,32 @@ def scale_slots_to_image(slots, img_w, img_h):
     return scaled
 
 
+def generate_grid_slots(img_w, img_h, rows, cols, roi=None):
+    if roi is None:
+        x1, y1, x2, y2 = 0, 0, img_w, img_h
+    else:
+        x1, y1, x2, y2 = roi
+        x1 = max(0, min(x1, img_w - 1))
+        y1 = max(0, min(y1, img_h - 1))
+        x2 = max(x1 + 1, min(x2, img_w))
+        y2 = max(y1 + 1, min(y2, img_h))
+
+    grid_w = x2 - x1
+    grid_h = y2 - y1
+    cell_w = grid_w / float(cols)
+    cell_h = grid_h / float(rows)
+
+    slots = []
+    for r in range(rows):
+        for c in range(cols):
+            sx1 = int(x1 + c * cell_w)
+            sy1 = int(y1 + r * cell_h)
+            sx2 = int(x1 + (c + 1) * cell_w)
+            sy2 = int(y1 + (r + 1) * cell_h)
+            slots.append((sx1, sy1, sx2, sy2))
+    return slots
+
+
 def rects_overlap(a, b):
     ax1, ay1, ax2, ay2 = a
     bx1, by1, bx2, by2 = b
@@ -73,10 +99,19 @@ def rect_area(r):
     return max(0, r[2] - r[0]) * max(0, r[3] - r[1])
 
 
-def process_frame(frame, slots, model, classes, conf, imgsz, device, overlap_threshold=0.15):
-    results = model.predict(frame, conf=conf, imgsz=imgsz,
-                            device=device, verbose=False)
+def clamp_box(x1, y1, x2, y2, w, h):
+    x1 = max(0, min(x1, w - 1))
+    y1 = max(0, min(y1, h - 1))
+    x2 = max(0, min(x2, w - 1))
+    y2 = max(0, min(y2, h - 1))
+    if x2 <= x1 or y2 <= y1:
+        return None
+    return (x1, y1, x2, y2)
 
+
+def detect_with_ultralytics(frame, detector, classes, conf, imgsz, device):
+    results = detector.predict(frame, conf=conf, imgsz=imgsz,
+                               device=device, verbose=False)
     detected_boxes = []
     for r in results:
         for box in r.boxes:
@@ -84,12 +119,84 @@ def process_frame(frame, slots, model, classes, conf, imgsz, device, overlap_thr
             if classes is not None and len(classes) > 0 and cls not in classes:
                 continue
             x1, y1, x2, y2 = map(int, box.xyxy[0])
-            detected_boxes.append((x1, y1, x2, y2))
+            box_clamped = clamp_box(x1, y1, x2, y2, frame.shape[1], frame.shape[0])
+            if box_clamped is not None:
+                detected_boxes.append(box_clamped)
+    return detected_boxes
+
+
+def detect_with_opencv_onnx(frame, net, classes, conf, imgsz):
+    h, w = frame.shape[:2]
+    blob = cv2.dnn.blobFromImage(
+        frame, scalefactor=1.0 / 255.0, size=(imgsz, imgsz), swapRB=True, crop=False
+    )
+    net.setInput(blob)
+    out = net.forward()
+
+    if out.ndim == 3:
+        out = out[0]
+    if out.ndim == 2 and out.shape[0] < out.shape[1]:
+        out = out.T
+
+    boxes_xywh = []
+    boxes_xyxy = []
+    scores = []
+
+    x_factor = w / float(imgsz)
+    y_factor = h / float(imgsz)
+
+    for row in out:
+        if row.shape[0] < 6:
+            continue
+
+        class_scores = row[4:]
+        class_id = int(np.argmax(class_scores))
+        score = float(class_scores[class_id])
+        if score < conf:
+            continue
+        if classes is not None and len(classes) > 0 and class_id not in classes:
+            continue
+
+        cx, cy, bw, bh = row[0], row[1], row[2], row[3]
+        x1 = int((cx - bw / 2.0) * x_factor)
+        y1 = int((cy - bh / 2.0) * y_factor)
+        x2 = int((cx + bw / 2.0) * x_factor)
+        y2 = int((cy + bh / 2.0) * y_factor)
+        clamped = clamp_box(x1, y1, x2, y2, w, h)
+        if clamped is None:
+            continue
+        x1c, y1c, x2c, y2c = clamped
+
+        boxes_xyxy.append((x1c, y1c, x2c, y2c))
+        boxes_xywh.append([x1c, y1c, max(1, x2c - x1c), max(1, y2c - y1c)])
+        scores.append(score)
+
+    if not boxes_xywh:
+        return []
+
+    indices = cv2.dnn.NMSBoxes(boxes_xywh, scores, conf, 0.45)
+    if len(indices) == 0:
+        return []
+
+    selected = []
+    for idx in np.array(indices).flatten().tolist():
+        selected.append(boxes_xyxy[idx])
+    return selected
+
+
+def process_frame(frame, slots, detector, backend, classes, conf, imgsz, device, overlap_threshold=0.15):
+    if backend == "ultralytics":
+        detected_boxes = detect_with_ultralytics(
+            frame, detector, classes, conf, imgsz, device)
+    else:
+        detected_boxes = detect_with_opencv_onnx(
+            frame, detector, classes, conf, imgsz)
 
     occupied_indices = set()
     for db in detected_boxes:
         best_idx = -1
         best_score = 0.0
+        best_slot_area = None
         db_area = rect_area(db)
         if db_area <= 0:
             continue
@@ -98,10 +205,24 @@ def process_frame(frame, slots, model, classes, conf, imgsz, device, overlap_thr
             if inter <= 0:
                 continue
             score = inter / float(db_area)
-            if score > best_score:
+            if score < overlap_threshold:
+                continue
+
+            slot_area = rect_area(s)
+            if best_slot_area is None:
+                best_slot_area = slot_area
                 best_score = score
                 best_idx = i
-        if best_idx >= 0 and best_score >= overlap_threshold:
+                continue
+
+            # Prefer the smallest valid overlapping slot. This avoids assigning
+            # all objects to one giant container slot if slot annotations include one.
+            if slot_area < best_slot_area or (slot_area == best_slot_area and score > best_score):
+                best_slot_area = slot_area
+                best_score = score
+                best_idx = i
+
+        if best_idx >= 0:
             occupied_indices.add(best_idx)
 
     annotated = frame.copy()
@@ -124,8 +245,16 @@ def main():
     p.add_argument("image", nargs="?", default=None,
                    help="Path to input image (optional when --camera is used)")
     p.add_argument("--model", default="yolo11n.pt", help="YOLO model path")
+    p.add_argument("--backend", choices=["ultralytics", "opencv"], default="ultralytics",
+                   help="Inference backend: ultralytics (PyTorch) or opencv (ONNX). Use opencv on Raspberry Pi if torch fails.")
     p.add_argument("--slots", default="annotated_parking_coords.txt",
                    help="Slots file (x1,y1,x2,y2[,flag])")
+    p.add_argument("--grid-rows", type=int, default=0,
+                   help="Generate slot grid rows dynamically (example: 3)")
+    p.add_argument("--grid-cols", type=int, default=0,
+                   help="Generate slot grid columns dynamically (example: 2)")
+    p.add_argument("--grid-roi", type=str, default=None,
+                   help="Optional ROI for grid as x1,y1,x2,y2; if omitted, whole image is used")
     p.add_argument("--output", "-o", default="parking_out.jpg",
                    help="Annotated output image")
     p.add_argument("--classes", nargs="*", type=int, default=None,
@@ -158,7 +287,26 @@ def main():
         print("Error: YOLO model not found:", args.model)
         return
 
-    model = YOLO(args.model)
+    if args.backend == "ultralytics":
+        try:
+            from ultralytics import YOLO
+        except Exception as e:
+            print("Error: failed to import ultralytics.")
+            print("This can happen on Raspberry Pi due to incompatible torch build.")
+            print("Use ONNX + OpenCV backend instead:")
+            print("python parking_system.py <image> --backend opencv --model yolo11n.onnx --slots annotated_parking_coords.txt -o out.jpg")
+            print("Import error:", e)
+            return
+        detector = YOLO(args.model)
+    else:
+        if not args.model.lower().endswith(".onnx"):
+            print("Error: OpenCV backend requires an ONNX model file (example: yolo11n.onnx)")
+            return
+        try:
+            detector = cv2.dnn.readNetFromONNX(args.model)
+        except cv2.error as e:
+            print("Error: failed to load ONNX model with OpenCV:", e)
+            return
 
     if args.camera:
         cap = cv2.VideoCapture(args.camera_index)
@@ -166,7 +314,15 @@ def main():
             print(f"Error: could not open camera index {args.camera_index}")
             return
 
-        slots = load_slots(args.slots)
+        slots = load_slots(args.slots) if not (args.grid_rows > 0 and args.grid_cols > 0) else None
+        roi = None
+        if args.grid_roi:
+            try:
+                vals = [int(v.strip()) for v in args.grid_roi.split(",")]
+                if len(vals) == 4:
+                    roi = tuple(vals)
+            except ValueError:
+                roi = None
         frame_count = 0
         while True:
             ok, frame = cap.read()
@@ -175,10 +331,15 @@ def main():
                 break
 
             frame_count += 1
-            scaled_slots = scale_slots_to_image(
-                slots, frame.shape[1], frame.shape[0])
+            if args.grid_rows > 0 and args.grid_cols > 0:
+                scaled_slots = generate_grid_slots(
+                    frame.shape[1], frame.shape[0], args.grid_rows, args.grid_cols, roi=roi
+                )
+            else:
+                scaled_slots = scale_slots_to_image(
+                    slots, frame.shape[1], frame.shape[0])
             annotated, occupied, free, total = process_frame(
-                frame, scaled_slots, model, args.classes, args.conf, args.imgsz, args.device
+                frame, scaled_slots, detector, args.backend, args.classes, args.conf, args.imgsz, args.device
             )
 
             if args.show:
@@ -208,10 +369,24 @@ def main():
         print("Error: failed to read image")
         return
 
-    slots = load_slots(args.slots)
-    scaled_slots = scale_slots_to_image(slots, img.shape[1], img.shape[0])
+    roi = None
+    if args.grid_roi:
+        try:
+            vals = [int(v.strip()) for v in args.grid_roi.split(",")]
+            if len(vals) == 4:
+                roi = tuple(vals)
+        except ValueError:
+            roi = None
+
+    if args.grid_rows > 0 and args.grid_cols > 0:
+        scaled_slots = generate_grid_slots(
+            img.shape[1], img.shape[0], args.grid_rows, args.grid_cols, roi=roi
+        )
+    else:
+        slots = load_slots(args.slots)
+        scaled_slots = scale_slots_to_image(slots, img.shape[1], img.shape[0])
     annotated, occupied, free, total = process_frame(
-        img, scaled_slots, model, args.classes, args.conf, args.imgsz, args.device
+        img, scaled_slots, detector, args.backend, args.classes, args.conf, args.imgsz, args.device
     )
 
     if args.show:
