@@ -7,9 +7,9 @@ from ultralytics import YOLO
 
 def parse_args():
     p = argparse.ArgumentParser(description="Run YOLO detect on an image")
-    p.add_argument("image", nargs="?", default="model_2/detect.jpeg",
-                   help="Path to image (default: model_2/detect.jpeg)")
-    p.add_argument("--output", "-o", default="annotated_detect.jpg",
+    p.add_argument("image", nargs="?", default="images/detect.jpeg",
+                   help="Path to image (default: images/detect.jpeg)")
+    p.add_argument("--output", "-o", default="images/annotated_detect.jpg",
                    help="Output image when GUI not available")
     return p.parse_args()
 
@@ -86,6 +86,9 @@ def main():
         cv2.destroyAllWindows()
     except cv2.error as e:
         print("OpenCV GUI not available; saving output to", args.output)
+        output_dir = os.path.dirname(args.output)
+        if output_dir:
+            os.makedirs(output_dir, exist_ok=True)
         cv2.imwrite(args.output, image)
         print("Saved:", args.output)
 

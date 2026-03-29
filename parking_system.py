@@ -99,6 +99,40 @@ def rect_area(r):
     return max(0, r[2] - r[0]) * max(0, r[3] - r[1])
 
 
+def visual_occupied_slot_candidates(frame, slots):
+    """Find occupied-looking slots using adaptive texture outliers.
+
+    Uses Laplacian variance per slot and computes a per-frame threshold from
+    the slot score distribution, avoiding fixed scene-specific constants.
+    """
+    slot_scores = []
+    for i, s in enumerate(slots):
+        x1, y1, x2, y2 = s
+        if x2 <= x1 or y2 <= y1:
+            continue
+
+        roi = frame[y1:y2, x1:x2]
+        if roi.size == 0:
+            continue
+
+        gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+        lap_var = float(cv2.Laplacian(gray, cv2.CV_64F).var())
+        slot_scores.append((i, lap_var))
+
+    if not slot_scores:
+        return []
+
+    values = np.array([v for _, v in slot_scores], dtype=np.float32)
+    q75 = float(np.quantile(values, 0.75))
+    med = float(np.median(values))
+    adaptive_threshold = max(q75, med * 3.0)
+
+    candidates = [(idx, score)
+                  for idx, score in slot_scores if score >= adaptive_threshold]
+    candidates.sort(key=lambda x: x[1], reverse=True)
+    return [idx for idx, _ in candidates]
+
+
 def clamp_box(x1, y1, x2, y2, w, h):
     x1 = max(0, min(x1, w - 1))
     y1 = max(0, min(y1, h - 1))
@@ -119,7 +153,8 @@ def detect_with_ultralytics(frame, detector, classes, conf, imgsz, device):
             if classes is not None and len(classes) > 0 and cls not in classes:
                 continue
             x1, y1, x2, y2 = map(int, box.xyxy[0])
-            box_clamped = clamp_box(x1, y1, x2, y2, frame.shape[1], frame.shape[0])
+            box_clamped = clamp_box(
+                x1, y1, x2, y2, frame.shape[1], frame.shape[0])
             if box_clamped is not None:
                 detected_boxes.append(box_clamped)
     return detected_boxes
@@ -225,6 +260,16 @@ def process_frame(frame, slots, detector, backend, classes, conf, imgsz, device,
         if best_idx >= 0:
             occupied_indices.add(best_idx)
 
+    frame_area = float(frame.shape[0] * frame.shape[1])
+    suspicious_detector_output = any((rect_area(
+        db) / frame_area) > 0.55 for db in detected_boxes) if frame_area > 0 else False
+
+    # Fallback when detector under-counts or emits a dominant frame-sized box.
+    if (len(occupied_indices) <= 1 or suspicious_detector_output) and len(slots) >= 2:
+        fallback_candidates = visual_occupied_slot_candidates(frame, slots)
+        if len(fallback_candidates) > len(occupied_indices):
+            occupied_indices = set(fallback_candidates)
+
     annotated = frame.copy()
     for i, s in enumerate(slots):
         occ = i in occupied_indices
@@ -255,7 +300,7 @@ def main():
                    help="Generate slot grid columns dynamically (example: 2)")
     p.add_argument("--grid-roi", type=str, default=None,
                    help="Optional ROI for grid as x1,y1,x2,y2; if omitted, whole image is used")
-    p.add_argument("--output", "-o", default="parking_out.jpg",
+    p.add_argument("--output", "-o", default="images/parking_out.jpg",
                    help="Annotated output image")
     p.add_argument("--classes", nargs="*", type=int, default=None,
                    help="Class IDs to treat as occupied objects (default: all classes)")
@@ -294,13 +339,14 @@ def main():
             print("Error: failed to import ultralytics.")
             print("This can happen on Raspberry Pi due to incompatible torch build.")
             print("Use ONNX + OpenCV backend instead:")
-            print("python parking_system.py <image> --backend opencv --model yolo11n.onnx --slots annotated_parking_coords.txt -o out.jpg")
+            print("python parking_system.py <image> --backend opencv --model yolo11n.onnx --slots annotated_parking_coords.txt -o images/out.jpg")
             print("Import error:", e)
             return
         detector = YOLO(args.model)
     else:
         if not args.model.lower().endswith(".onnx"):
-            print("Error: OpenCV backend requires an ONNX model file (example: yolo11n.onnx)")
+            print(
+                "Error: OpenCV backend requires an ONNX model file (example: yolo11n.onnx)")
             return
         try:
             detector = cv2.dnn.readNetFromONNX(args.model)
@@ -314,7 +360,8 @@ def main():
             print(f"Error: could not open camera index {args.camera_index}")
             return
 
-        slots = load_slots(args.slots) if not (args.grid_rows > 0 and args.grid_cols > 0) else None
+        slots = load_slots(args.slots) if not (
+            args.grid_rows > 0 and args.grid_cols > 0) else None
         roi = None
         if args.grid_roi:
             try:
@@ -352,6 +399,9 @@ def main():
                     pass
 
             if frame_count % max(1, args.save_interval) == 0:
+                output_dir = os.path.dirname(args.output)
+                if output_dir:
+                    os.makedirs(output_dir, exist_ok=True)
                 cv2.imwrite(args.output, annotated)
                 print(
                     f"Frame {frame_count}: Total={total}, Occupied={occupied}, Free={free}")
@@ -397,6 +447,9 @@ def main():
         except cv2.error:
             pass
 
+    output_dir = os.path.dirname(args.output)
+    if output_dir:
+        os.makedirs(output_dir, exist_ok=True)
     cv2.imwrite(args.output, annotated)
     print("Saved annotated image to", args.output)
     print(f"Total slots: {total}; Occupied: {occupied}; Free: {free}")

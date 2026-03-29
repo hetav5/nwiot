@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Smart Parking Monitor</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;700&family=Plus+Jakarta+Sans:wght@400;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="bg-grid"></div>
+  <main class="layout" id="appRoot">
+    <section class="hero card">
+      <div class="card-header hero-header">
+        <p class="eyebrow">LIVE OPS</p>
+        <h1>Smart Parking Monitor</h1>
+        <div class="subtitle">Upload a frame or connect phone IP webcam and get free/occupied slots instantly.</div>
+      </div>
+      <div class="content">
+        <div class="mode-toggle" role="tablist" aria-label="Input mode">
+          <button id="modeImageBtn" class="active" data-mode="image" role="tab">Image Upload</button>
+          <button id="modeIpcamBtn" data-mode="ipcam" role="tab">Phone IP Webcam</button>
+        </div>
+
+        <div id="imageModePanel" class="panel block-panel">
+          <div class="field full">
+            <label for="imageFile">Choose Image</label>
+            <input id="imageFile" type="file" accept="image/*" />
+          </div>
+          <div class="actions compact">
+            <button class="btn btn-primary" id="analyzeImageBtn">Analyze Uploaded Image</button>
+          </div>
+        </div>
+
+        <div id="ipcamModePanel" class="panel block-panel hidden">
+          <div class="field full">
+            <label for="ipcamUrl">IP Webcam URL</label>
+            <input id="ipcamUrl" type="text" placeholder="http://192.168.1.23:8080/video or /shot.jpg" />
+          </div>
+          <div class="field full inline-note">
+            <span>Tip: use your phone with an IP webcam app and keep both devices on same Wi-Fi.</span>
+          </div>
+          <div class="field-row">
+            <div class="field">
+              <label for="liveInterval">Live Pull Every (seconds)</label>
+              <input id="liveInterval" type="number" min="1" value="2" />
+            </div>
+          </div>
+          <div class="actions compact">
+            <button class="btn btn-secondary" id="captureIpcamBtn">Capture & Analyze</button>
+            <button class="btn btn-light" id="toggleLiveBtn">Start Live Pull</button>
+          </div>
+        </div>
+
+        <details class="advanced">
+          <summary>Detection Settings</summary>
+          <div class="grid settings-grid" id="formGrid">
+            <div class="field">
+              <label for="modelPath">Model Path</label>
+              <input id="modelPath" type="text" value="yolo11n.pt" />
+            </div>
+            <div class="field">
+              <label for="backend">Backend</label>
+              <select id="backend">
+                <option value="ultralytics">ultralytics</option>
+                <option value="opencv">opencv (ONNX)</option>
+              </select>
+            </div>
+
+            <div class="field">
+              <label for="slotsPath">Slots File</label>
+              <input id="slotsPath" type="text" value="annotated_parking_coords.txt" />
+            </div>
+            <div class="field">
+              <label for="device">Device</label>
+              <input id="device" type="text" value="cpu" />
+            </div>
+
+            <div class="field">
+              <label for="imgsz">Image Size</label>
+              <input id="imgsz" type="number" value="416" min="128" step="32" />
+            </div>
+            <div class="field">
+              <label for="conf">Confidence</label>
+              <input id="conf" type="number" value="0.25" step="0.01" min="0" max="1" />
+            </div>
+
+            <div class="field">
+              <label for="gridRows">Grid Rows (optional)</label>
+              <input id="gridRows" type="number" min="0" value="0" />
+            </div>
+            <div class="field">
+              <label for="gridCols">Grid Cols (optional)</label>
+              <input id="gridCols" type="number" min="0" value="0" />
+            </div>
+
+            <div class="field full">
+              <label for="gridRoi">Grid ROI (optional: x1,y1,x2,y2)</label>
+              <input id="gridRoi" type="text" placeholder="Example: 0,0,830,1280" />
+            </div>
+          </div>
+        </details>
+
+        <div class="hint" id="feedbackText">Ready. Choose mode, provide input, then click analyze.</div>
+      </div>
+    </section>
+
+    <section class="card result-card">
+      <div class="card-header">
+        <h1>Detection Result</h1>
+        <div class="subtitle">Counts update after each analysis request.</div>
+      </div>
+      <div class="content">
+        <div class="status-row">
+          <div class="metric total">
+            <div class="label">Total</div>
+            <div class="value" id="metricTotal">-</div>
+          </div>
+          <div class="metric occupied">
+            <div class="label">Occupied</div>
+            <div class="value" id="metricOccupied">-</div>
+          </div>
+          <div class="metric free">
+            <div class="label">Free</div>
+            <div class="value" id="metricFree">-</div>
+          </div>
+        </div>
+
+        <div class="image-wrap">
+          <img id="previewImage" alt="Annotated parking output preview" />
+          <div id="previewPlaceholder" class="preview-placeholder">
+            Process a frame to see annotated output here.
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>
